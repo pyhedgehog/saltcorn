@@ -23,11 +23,20 @@ import Table from "./table";
  * @returns {Promise<object[]>} all tables that can be imported to Saltcorn from current tenant database schema
  */
 const discoverable_tables = async (schema0?: string): Promise<Row[]> => {
-  const schema = schema0 || db.getTenantSchema();
-  const { rows } = await db.query(
-    "select * from information_schema.tables where table_schema=$1 order by table_name",
-    [schema]
-  );
+  var rows;
+  if(db.isSQLite) {
+    const schema = schema0 || 'main';
+    { rows } = await db.query(
+      "select name table_name from pragma_table_list where schema=$1 order by table_name",
+      [schema]
+    );
+  } else {
+    const schema = schema0 || db.getTenantSchema();
+    { rows } = await db.query(
+      "select * from information_schema.tables where table_schema=$1 order by table_name",
+      [schema]
+    );
+  }
   const myTables = await Table.find({});
   const myTableNames = myTables.map((t) => sqlsanitize(t.name));
   const myTableHistoryNames = myTables
@@ -49,6 +58,15 @@ const discoverable_tables = async (schema0?: string): Promise<Row[]> => {
  * @returns {Promise<object[]>} Return list of views
  */
 const get_existing_views = async (schema0?: string): Promise<Row[]> => {
+  if(db.isSQLite) {
+    //const schema = schema0 || db.getTenantSchema();
+    const schema = schema0 || 'main';
+    const { rows } = await db.query(
+      "select * from pragma_table_list where schema=$1 and type='view'",
+      [schema]
+    );
+    return rows;
+  }
   const schema = schema0 || db.getTenantSchema();
   const { rows } = await db.query(
     "select * from information_schema.views where table_schema=$1",
@@ -103,10 +121,21 @@ const discover_tables = async (
   const packTables = new Array<TablePack>();
 
   for (const tnm of tableNames) {
-    const { rows } = await db.query(
-      "select * from information_schema.columns where table_schema=$1 and table_name=$2",
-      [schema, tnm]
-    );
+    var rows, pkq, fkq;
+    if(db.isSQLite) {
+      { rows } = await db.query(
+        "select cid,name column_name,"+
+        "(case when type='' then 'text' else type end)data_type,"+
+        "(case when \"notnull\"==0 then 'NO' else'YES'end) is_nullable, pk "+
+        "from pragma_table_info($1) order by cid",
+        [tnm]
+      );
+    } else {
+      { rows } = await db.query(
+        "select * from information_schema.columns where table_schema=$1 and table_name=$2",
+        [schema, tnm]
+      );
+    }
     // TBD add logic about column length, scale, etc
     const fields = rows
       .map((c: Row) => ({
@@ -118,15 +147,19 @@ const discover_tables = async (
       .filter((f: FieldCfg) => f.type);
 
     // try to find column name for primary key of table
-    const pkq = await db.query(
-      `SELECT c.column_name
-      FROM information_schema.table_constraints tc 
-      JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) 
-      JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema
-        AND tc.table_name = c.table_name AND ccu.column_name = c.column_name
-      WHERE constraint_type = 'PRIMARY KEY' and tc.table_schema=$1 and tc.table_name = $2;`,
-      [schema, tnm]
-    );
+    if(db.isSQLite) {
+      pkq = { rows: rows.filter((c: Row) => c.pk===1).map((c: Row) => c.column_name) };
+    } else {
+      pkq = await db.query(
+        `SELECT c.column_name
+        FROM information_schema.table_constraints tc 
+        JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name) 
+        JOIN information_schema.columns AS c ON c.table_schema = tc.constraint_schema
+          AND tc.table_name = c.table_name AND ccu.column_name = c.column_name
+        WHERE constraint_type = 'PRIMARY KEY' and tc.table_schema=$1 and tc.table_name = $2;`,
+        [schema, tnm]
+      );
+    }
     // set primary_key and unique attributes for column
     pkq.rows.forEach(({ column_name }: { column_name: string }) => {
       const field = fields.find((f: FieldCfg) => f.name === column_name);
@@ -134,7 +167,12 @@ const discover_tables = async (
       field.is_unique = true;
     });
     // try to find foreign keys
-    const fkq = await db.query(
+    if(db.isSQLite) {
+      fkq = await db.query("select \"from\" column_name, \"table\" foreign_table_name, \"to\" foreign_column_name from pragma_foreign_key_list($1)",
+        [tnm]
+      );
+    } else {
+      fkq = await db.query(
       `SELECT
       tc.table_schema, 
       tc.constraint_name, 
@@ -152,8 +190,9 @@ const discover_tables = async (
         ON ccu.constraint_name = tc.constraint_name
         AND ccu.table_schema = tc.table_schema
   WHERE tc.constraint_type = 'FOREIGN KEY' and tc.table_schema=$1 AND tc.table_name=$2;`,
-      [schema, tnm]
-    );
+        [schema, tnm]
+      );
+    }
     // construct foreign key relations
     fkq.rows.forEach(
       ({

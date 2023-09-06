@@ -86,15 +86,13 @@ const create_db_view = async (context) => {
  * @returns {Promise<void>}
  */
 const on_delete = async (table_id, viewname, { default_state }) => {
-  if (!db.isSQLite) {
-    const sqlviews = (await get_existing_views()).map((v) => v.table_name);
-    const vnm = db.sqlsanitize(viewname);
-    const schema = db.getTenantSchemaPrefix();
-    if (sqlviews.includes(vnm))
-      await db.query(`drop view if exists ${schema}"${vnm}";`);
-    if (sqlviews.includes(vnm + "_sqlview"))
-      await db.query(`drop view if exists ${schema}"${vnm + "_sqlview"}";`);
-  }
+  const sqlviews = (await get_existing_views()).map((v) => v.table_name);
+  const vnm = db.sqlsanitize(viewname);
+  const schema = db.getTenantSchemaPrefix();
+  if (sqlviews.includes(vnm))
+    await db.query(`drop view if exists ${schema}"${vnm}";`);
+  if (sqlviews.includes(vnm + "_sqlview"))
+    await db.query(`drop view if exists ${schema}"${vnm + "_sqlview"}";`);
 };
 
 /**
